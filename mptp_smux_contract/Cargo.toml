@@ -1,0 +1,56 @@
+# `mptp_core` 与 `smux_v1` 之间的**需求对齐检验**。
+#
+# 与同 workspace 的 `mptp_cs_smoke` 分工不同：smoke 问「整条链路能不能跑通」（端到端
+# 冒烟，成功即通过），本 crate 问「**两边对同一件事的约定是否一致**」——把 `mptp_core`
+# 对 `smux_v1` 的依赖逐条写成可断言、可失败的用例。失败的用例本身就是结论：它指出的
+# 是一处**需求缺口**，而不是「代码写错了」。
+#
+# 首轮聚焦**拆流（teardown）**：`smux_v1` 把关闭定义成两个正交方向（`FIN` / `RESET`，
+# 见 `smux_v1::connection` 模块文档 §7.0），而 `mptp_core` 的收尾依赖「对端关闭会立刻
+# 表现为读端 EOF」（见 `mptp_core::serving::server` 的 `drain_until_eof_`）。这两句话
+# 是否等价，正是本 crate 要回答的。
+[package]
+name = "mptp_smux_contract"
+version = "0.1.0"
+edition = "2024"
+description = "mptp_core 与 smux_v1 的需求对齐检验：把「两边对同一件事的约定」写成可断言的用例。"
+readme = "README.md"
+publish = false
+
+[dependencies]
+# 关掉缺省后端：后端选择完全交给本 crate 的 `rt-*` feature（与 `mptp_cs_smoke` 同一套）。
+mptp_core = { path = "../../mptp_rpc/mptp_core", default-features = false }
+
+# 走 `mptp_core` 的 `x_deps` 取复用实现，保证与被检验的 `mptp_core` 用的是**同一个源**
+# （否则会出现「同名不同源的环半部类型」——`mptp_cs_smoke` 的 README §7 记录了这个坑）。
+smux_v1 = { path = "../../smux_v1", default-features = false }
+
+# `abs_smux` / `abs_buff` / `abs_cancel` 是本 crate **直接引用**的契约与 trait 宿主
+# （子流收发半部、`TrChannelHalf`、取消令牌），因此必须各自独立声明。
+#
+# 关键：这里用的是**与 `smux_v1`、`mptp_core` manifest 里逐字相同的 git spec**
+# （同 URL + 同 branch）。若改用本机 `path`（哪怕代码一模一样），Cargo 会把它们当成
+# 两个 source，于是 `smux_v1` 内部实现的 awaitable 与我从 `x_deps` 取到的
+# `TrMayCancel` 属于**两份代码里的两个 trait**——编译期就会报
+# `AcceptAsync == MuxAcceptAsync` 之类的类型不匹配。这正是 `mptp_cs_smoke` 的
+# README §7「同名不同源」一节记录的坑，这里按同一条规则处理。
+abs_smux = { git = "https://gitee.com/lino_snsalias/abs_smux.git", branch = "dev/0.1.0" }
+abs_buff = { git = "https://gitee.com/lino_snsalias/abs_buff.git", branch = "dev/0.3.0" }
+abs_cancel = { git = "https://gitee.com/lino_snsalias/abs_cancel-rs.git", branch = "dev/0.2.0" }
+# 同步读适配器：用例 ④ 要用它与 `mptp_core::serving` 的收尾**同形**地发起一次阻塞读。
+abs_buff_stdio_adapt = { git = "https://gitee.com/lino_snsalias/abs_buff_stdio_adapt.git" }
+
+anyhow = "1"
+# 三个运行时都是正式依赖：本 crate 不按后端分设备，所有用例都跑**进程内环回**，
+# 但握手的驱动方式与本地队列的归属按后端而变（见 `src/loopback_.rs`）。
+tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "time"], optional = true }
+compio = { version = "0.19.*", features = ["macros", "net", "runtime", "time"], optional = true }
+smol = { version = "2", optional = true }
+
+[features]
+# 与 `mptp_cs_smoke` **完全同构**的 `rt-*` 三选一：两边共用同一套后端选择，
+# 因此本 crate 不会给 workspace 引入第二个「后端决定点」。
+default = ["rt-compio"]
+rt-compio = ["dep:compio", "mptp_core/rt-compio", "smux_v1/test-compio-runtime"]
+rt-smol = ["dep:smol", "mptp_core/rt-smol", "smux_v1/test-smol-runtime"]
+rt-tokio = ["dep:tokio", "mptp_core/rt-tokio", "smux_v1/test-tokio-runtime"]
